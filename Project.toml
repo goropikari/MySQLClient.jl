@@ -1,0 +1,17 @@
+name = "MySQLClient"
+uuid = "b232bdda-9571-4180-aa1d-16d54f7af2d2"
+authors = ["goropikari <goropikari56@gmail.com> and contributors"]
+version = "0.1.0"
+
+[deps]
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
+
+[compat]
+julia = "1"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
