@@ -10,7 +10,6 @@ const CLIENT_TRANSACTIONS = 0x2000
 const CLIENT_LONG_FLAG = 0x0004
 const CLIENT_PLUGIN_AUTH = 0x00080000
 
-
 const Byte = UInt8
 
 struct MySQLPacket
@@ -37,14 +36,6 @@ function connect(host, username, password, port=3306)
     function handshake()
         packet = MySQLPacket(sock)
         payload = IOBuffer(copy(packet.payload))
-
-        # initial packet
-        # payload = IOBuffer(
-        #  [                    0x0a,0x35,0x2e,0x36,0x2e,0x32,0x30,0x00,0x01,0x00,0x00,0x00,
-        #   0x21,0x4b,0x3a,0x7e,0x30,0x6f,0x61,0x78,0x00,0xff,0xf7,0x21,0x02,0x00,0x7f,0x80,
-        #   0x15,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x58,0x30,0x26,0x6a,0x64,
-        #   0x3a,0x34,0x33,0x45,0x40,0x53,0x5e,0x00,0x6d,0x79,0x73,0x71,0x6c,0x5f,0x6e,0x61,
-        #   0x74,0x69,0x76,0x65,0x5f,0x70,0x61,0x73,0x73,0x77,0x6f,0x72,0x64,0x00])
 
         # https://dev.mysql.com/doc/internals/en/connection-phase-packets.html
         protocol_version = Int(read(payload, 1)[])
@@ -90,22 +81,22 @@ function connect(host, username, password, port=3306)
         payload_size = buffer_size - 4
 
         # header
-        write(buffer, reinterpret(UInt8, [payload_size])[1:3])
+        write(buffer, reinterpret(Byte, [payload_size])[1:3])
         write(buffer, 0x01) # sequence_id 決め打ち
 
         # payload
         capability_flags = Int32(CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION
                                   | CLIENT_LONG_PASSWORD | CLIENT_TRANSACTIONS
                                   | CLIENT_LONG_FLAG)
-        write(buffer, reinterpret(UInt8, [capability_flags])[1:4])
-        write(buffer, zeros(UInt8, 4)) # max packet size は 0 でいいので skip
+        write(buffer, reinterpret(Byte, [capability_flags])[1:4])
+        write(buffer, zeros(Byte, 4)) # max packet size は 0 でいいので skip
         write(buffer, charset)
-        write(buffer, zeros(UInt8, 23)) # reserved
-        write(buffer, transcode(UInt8, username))
+        write(buffer, zeros(Byte, 23)) # reserved
+        write(buffer, transcode(Byte, username))
         write(buffer, 0x0)
-        write(buffer, UInt8(length(auth_response)))
+        write(buffer, Byte(length(auth_response)))
         write(buffer, auth_response)
-        write(buffer, transcode(UInt8, auth_plugin_name))
+        write(buffer, transcode(Byte, auth_plugin_name))
         write(buffer, 0x0)
 
         write(sock, buffer.data)
@@ -113,7 +104,9 @@ function connect(host, username, password, port=3306)
 
         header, payload = _read_packet(sock)
         if (iszero(payload[1]))
-            println("OK")
+            println("Welcome to the MySQL monitor")
+            println("Your MySQL connection id is $(connection_id)")
+            println("Server version: $(mysql_server_version)")
         else
             println("Connection failed")
         end
@@ -122,6 +115,79 @@ function connect(host, username, password, port=3306)
 
     # return MySQLConnection(sock)
     return sock
+end
+
+
+function execute(sock, query)
+    write(sock, _com_query(query))
+
+    packet = MySQLPacket(sock)
+
+    payload = copy(packet.payload)
+    if payload[1] == 0x00
+        println("OK")
+        return
+    end
+    column_count, _ = _read_lenenc_int(payload)
+
+    col_names = String[]
+    while (true)
+        packet = MySQLPacket(sock)
+        payload = copy(packet.payload)
+        if payload[1] == 0xfe
+            break
+        elseif payload[1] == 0x00
+            error("Unsupported query result")
+        else
+            offset = 1
+            catalog, len = _read_lenenc_str(payload[offset:end])
+            offset += len
+            schema, len = _read_lenenc_str(payload[offset:end])
+            offset += len
+            table, len = _read_lenenc_str(payload[offset:end])
+            offset += len
+            org_table, len = _read_lenenc_str(payload[offset:end])
+            offset += len
+            col_name, len = _read_lenenc_str(payload[offset:end])
+            push!(col_names, col_name)
+            offset += len
+            org_name, len = _read_lenenc_str(payload[offset:end])
+            offset += len
+            offset += 1 # length of fixed length fields
+            charset = _little_endian_int(payload[offset:offset+1])
+            offset += 2
+            column_length = _little_endian_int(payload[offset:offset+3])
+            offset += 4
+            column_type = payload[offset]
+            offset += 1
+            flags = _little_endian_int(payload[offset:offset+1])
+            offset += 2
+            decimals = payload[offset]
+            offset += 1
+        end
+    end
+
+    for col in col_names
+        print("\t$(col)")
+    end
+    println()
+    println("-"^30)
+
+    while (true)
+        packet = MySQLPacket(sock)
+        payload = copy(packet.payload)
+        if payload[1] == 0xfe
+            break
+        else
+            offset = 1
+            for i in 1:column_count
+                value, len = _read_lenenc_str(payload[offset:end])
+                offset += len
+                print("\t$(value)")
+            end
+            println()
+        end
+    end
 end
 
 function query(conn::MySQLConnection) end
@@ -134,7 +200,7 @@ function _read_packet(sock)
     return header, payload
 end
 
-function _little_endian_int(arr::Vector{UInt8})
+function _little_endian_int(arr::Vector{Byte})
     num = Int64(0)
     for (i, c) in enumerate(arr)
         num += Int64(c) << (8 * (i - 1))
@@ -142,4 +208,51 @@ function _little_endian_int(arr::Vector{UInt8})
     return num
 end
 
-end #module
+# https://dev.mysql.com/doc/internals/en/com-query.html
+function _com_query(query)
+    payload_size = length(query) + 1 # 1 = for command_id
+    buffer = IOBuffer(maxsize=payload_size+4)
+    write(buffer, reinterpret(UInt8, [payload_size])[1:3])
+    write(buffer, 0x00) # sequence_id
+    write(buffer, 0x03) # command_id
+    write(buffer, transcode(UInt8, query))
+
+    return buffer.data
+end
+
+function _read_lenenc_int(payload::Vector{Byte})
+    io = IOBuffer(copy(payload))
+    c = read(io, 1)[]
+    offset = 1
+    if c == 0xfb
+        println("ERROR")
+        return 0, offset
+    elseif c == 0xfc
+        result = _little_endian_int(read(io, 2))
+        offset = 3
+    elseif c == 0xfd
+        result = _little_endian_int(read(io. 3))
+        offset = 4
+    elseif c == 0xfe
+        result = _little_endian_int(read(io. 8))
+        offset = 9
+    elseif c == 0xff
+        println("ERROR PACKET")
+    else
+        result = Int64(c)
+    end
+
+    return result, offset
+end
+
+function _read_lenenc_str(payload::Vector{Byte})
+    payload = copy(payload)
+    len, offset = _read_lenenc_int(payload)
+    offset += 1
+
+    result = payload[offset:offset+len-1]
+
+    return String(result), offset + len - 1
+end
+
+end # module
