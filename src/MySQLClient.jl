@@ -9,6 +9,7 @@ const CLIENT_LONG_PASSWORD = 0x0004
 const CLIENT_TRANSACTIONS = 0x2000
 const CLIENT_LONG_FLAG = 0x0004
 const CLIENT_PLUGIN_AUTH = 0x00080000
+const ERROR_PACKET = 0xff
 
 const Byte = UInt8
 
@@ -100,20 +101,12 @@ function _parse_init_packet!(conn)
     end
 end
 
+# hankshake response packet
 function _make_respose_packet(conn)
-    # hankshake response packet
-    #
-    ## https://dev.mysql.com/doc/internals/en/secure-password-authentication.html#packet-Authentication::Native41
-    # sha1(password) xor concat("20-bytes random data from server", sha1(sha1(password)))
-    random_data = conn.auth_plugin_data[1:20]
-    auth_response = SHA.sha1(SHA.sha1(conn.password))
-    auth_response = vcat(random_data, auth_response)
-    auth_response = SHA.sha1(auth_response)
-    auth_response = xor.(SHA.sha1(conn.password), auth_response)
+    auth_response = _make_auth_response(conn)
 
     # calc payload size
-    # capability flags, max-packet size, charset, reserved
-    payload_size = 4 + 4 + 1 + 23
+    payload_size = 4 + 4 + 1 + 23 # capability flags, max-packet size, character_set, reserved
     payload_size += length(conn.username) + 1 # 1 = null termination
     payload_size += 1 # length of auth-response
     payload_size += length(auth_response)
@@ -122,13 +115,13 @@ function _make_respose_packet(conn)
 
     # Make header
     header = vcat(reinterpret(Byte, [payload_size])[1:3], conn.sequence_id)
-    conn.sequence_id = mod1(conn.sequence_id, 0xff)
+    conn.sequence_id = mod1(conn.sequence_id + 0x01, 0xff)
 
     # payload
     capability_flags = Int32(CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION
                              | CLIENT_LONG_PASSWORD | CLIENT_TRANSACTIONS
                              | CLIENT_LONG_FLAG)
-    write(payload, reinterpret(Byte, [capability_flags])[1:4])
+    write(payload, reinterpret(Byte, [capability_flags]))
     write(payload, zeros(Byte, 4)) # max packet size は 0 でいいので skip
     write(payload, [conn.character_set_uint8])
     write(payload, zeros(Byte, 23)) # reserved
@@ -142,6 +135,21 @@ function _make_respose_packet(conn)
     return MySQLPacket(header, payload.data)
 end
 
+function _make_auth_response(conn)
+    auth_response = UInt8[]
+    if conn.auth_plugin_name == "mysql_native_password"
+        # https://dev.mysql.com/doc/internals/en/secure-password-authentication.html#packet-Authentication::Native41
+        # sha1(password) xor concat("20-bytes random data from server", sha1(sha1(password)))
+        random_data = conn.auth_plugin_data[1:20]
+        auth_response = SHA.sha1(SHA.sha1(conn.password))
+        auth_response = vcat(random_data, auth_response)
+        auth_response = SHA.sha1(auth_response)
+        auth_response = xor.(SHA.sha1(conn.password), auth_response)
+    end
+
+    return auth_response
+end
+
 function execute(sock, query)
     write(sock, _com_query(query))
 
@@ -152,7 +160,7 @@ function execute(sock, query)
         println("OK")
         return
     end
-    column_count, _ = _read_lenenc_int(payload)
+    column_count, _, _ = _read_lenenc_int(payload)
 
     col_names = String[]
     while (true)
@@ -178,7 +186,7 @@ function execute(sock, query)
             org_name, len = _read_lenenc_str(payload[offset:end])
             offset += len
             offset += 1 # length of fixed length fields
-            charset = _little_endian_int(payload[offset:offset+1])
+            character_set = _little_endian_int(payload[offset:offset+1])
             offset += 2
             column_length = _little_endian_int(payload[offset:offset+3])
             offset += 4
@@ -188,6 +196,7 @@ function execute(sock, query)
             offset += 2
             decimals = payload[offset]
             offset += 1
+            @show catalog, schema, table, org_table, col_name, org_name, character_set, column_length, column_type, flags, decimals
         end
     end
 
@@ -244,39 +253,44 @@ function _com_query(query)
     return buffer.data
 end
 
+# https://dev.mysql.com/doc/internals/en/integer.html#packet-Protocol::LengthEncodedInteger
 function _read_lenenc_int(payload::Vector{Byte})
     io = IOBuffer(copy(payload))
     c = read(io, 1)[]
     _read = 1 # number of already read bytes
     result = 0
-    if c == 0xfb
-        println("ERROR")
-    elseif c == 0xfc
+    err = 0x00
+    if c == 0xfb # 251
+        println("NULL")
+        err = c
+    elseif c == 0xfc # 252
         result = _little_endian_int(read(io, 2))
         _read += 2
-    elseif c == 0xfd
+    elseif c == 0xfd # 253
         result = _little_endian_int(read(io. 3))
         _read += 3
-    elseif c == 0xfe
+    elseif c == 0xfe # 254
         result = _little_endian_int(read(io. 8))
         _read += 8
-    elseif c == 0xff
+    elseif c == 0xff # 255
+        # https://dev.mysql.com/doc/internals/en/packet-ERR_Packet.html
         println("ERROR PACKET")
+        err = c
     else
         result = Int64(c)
     end
 
-    return result, _read
+    return result, _read, c
 end
 
 function _read_lenenc_str(payload::Vector{Byte})
     payload = copy(payload)
-    strlen, _read = _read_lenenc_int(payload)
+    strlen, _read, err = _read_lenenc_int(payload)
     offset = _read + 1
-
     result = payload[offset : offset+strlen-1]
 
     return String(result), _read + strlen
 end
+
 
 end # module
