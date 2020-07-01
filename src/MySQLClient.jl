@@ -12,12 +12,12 @@ const CLIENT_PLUGIN_AUTH = 0x00080000
 
 const Byte = UInt8
 
-struct MySQLPacket
+struct Packet
     payload_payload_length::Int
     sequence_id::Int
     payload::Vector{Byte}
 
-    function MySQLPacket(header, payload)
+    function Packet(header, payload)
         new(
             _little_endian_int(header[1:3]),
             Int(header[4]),
@@ -25,16 +25,25 @@ struct MySQLPacket
         )
     end
 end
-MySQLPacket(sock) = MySQLPacket(_read_packet(sock)...)
 
-struct MySQLConnection end
+struct Connection
+    sock::Sockets.TCPSocket
+end
 
+# Packet(sock) = Packet(_read_packet(sock)...)
+# Packet(conn::Connection) = Packet(_read_packet(conn.sock)...)
+function Base.write(conn::Connection, x::Vector{Byte})
+    write(conn.sock, x)
+end
+Base.read(conn::Connection) = read(conn.sock)
+Base.read(conn::Connection, x) = read(conn.sock, x)
+Base.isopen(conn::Connection) = isopen(conn.sock)
 
 function connect(host, username, password, port=3306)
-    sock = Sockets.connect(host, port)
+    conn = Connection(Sockets.connect(host, port))
 
     function handshake()
-        packet = MySQLPacket(sock)
+        packet = Packet(_read_packet(conn)...)
         payload = IOBuffer(copy(packet.payload))
 
         # https://dev.mysql.com/doc/internals/en/connection-phase-packets.html
@@ -99,10 +108,10 @@ function connect(host, username, password, port=3306)
         write(buffer, transcode(Byte, auth_plugin_name))
         write(buffer, 0x0)
 
-        write(sock, buffer.data)
+        write(conn, buffer.data)
 
 
-        header, payload = _read_packet(sock)
+        header, payload = _read_packet(conn)
         if (iszero(payload[1]))
             println("Welcome to the MySQL monitor")
             println("Your MySQL connection id is $(connection_id)")
@@ -113,15 +122,14 @@ function connect(host, username, password, port=3306)
     end
     handshake()
 
-    # return MySQLConnection(sock)
-    return sock
+    return conn
 end
 
 
 function execute(sock, query)
     write(sock, _com_query(query))
 
-    packet = MySQLPacket(sock)
+    packet = Packet(_read_packet(sock)...)
 
     payload = copy(packet.payload)
     if payload[1] == 0x00
@@ -132,7 +140,7 @@ function execute(sock, query)
 
     col_names = String[]
     while (true)
-        packet = MySQLPacket(sock)
+        packet = Packet(_read_packet(sock)...)
         payload = copy(packet.payload)
         if payload[1] == 0xfe
             break
@@ -174,7 +182,7 @@ function execute(sock, query)
     println("-"^30)
 
     while (true)
-        packet = MySQLPacket(sock)
+        packet = Packet(_read_packet(sock)...)
         payload = copy(packet.payload)
         if payload[1] == 0xfe
             break
@@ -189,8 +197,9 @@ function execute(sock, query)
         end
     end
 end
+execute(conn::Connection, query) = execute(conn.sock, query)
 
-function query(conn::MySQLConnection) end
+
 
 function _read_packet(sock)
     header = read(sock, 4)
@@ -199,6 +208,7 @@ function _read_packet(sock)
 
     return header, payload
 end
+_read_packet(conn::Connection) = _read_packet(conn.sock)
 
 function _little_endian_int(arr::Vector{Byte})
     num = Int64(0)
