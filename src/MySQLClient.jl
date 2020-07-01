@@ -42,7 +42,7 @@ mutable struct MySQLConnection
     auth_plugin_data::Vector{Byte}
 
     function MySQLConnection(sock; host="127.0.0.1", port=3306, username="root", password="", database="")
-        new(sock, host, port, username, password, database, -1, v"0.0.0", 0x00, -1, 0x00, "", UInt8[])
+        new(sock, host, port, username, password, database, -1, v"0.0.0", 0x00, -1, 0x01, "", UInt8[])
     end
 end
 
@@ -126,36 +126,35 @@ function _make_respose_packet(conn)
     auth_response = SHA.sha1(auth_response)
     auth_response = xor.(SHA.sha1(conn.password), auth_response)
 
-    # header, capability flags, max-packet size, charset, reserved
-    buffer_size = 4 + 4 + 4 + 1 + 23
-    buffer_size += length(conn.username) + 1 # 1 = null termination
-    buffer_size += 1 # length of auth-response
-    buffer_size += length(auth_response)
-    buffer_size += length(conn.auth_plugin_name) + 1 # 1 = null termination
-    buffer = IOBuffer(maxsize=buffer_size)
-    payload_size = buffer_size - 4
+    # calc payload size
+    # capability flags, max-packet size, charset, reserved
+    payload_size = 4 + 4 + 1 + 23
+    payload_size += length(conn.username) + 1 # 1 = null termination
+    payload_size += 1 # length of auth-response
+    payload_size += length(auth_response)
+    payload_size += length(conn.auth_plugin_name) + 1 # 1 = null termination
+    payload = IOBuffer(maxsize=payload_size)
 
-    # header
-    write(buffer, reinterpret(Byte, [payload_size])[1:3])
-    write(buffer, 0x01) # sequence_id 決め打ち
+    # Make header
+    header = vcat(reinterpret(Byte, [payload_size])[1:3], conn.sequence_id)
+    conn.sequence_id = mod1(conn.sequence_id, 0xff)
 
     # payload
     capability_flags = Int32(CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION
                              | CLIENT_LONG_PASSWORD | CLIENT_TRANSACTIONS
                              | CLIENT_LONG_FLAG)
-    write(buffer, reinterpret(Byte, [capability_flags])[1:4])
-    write(buffer, zeros(Byte, 4)) # max packet size は 0 でいいので skip
-    write(buffer, [conn.character_set_uint8])
-    write(buffer, zeros(Byte, 23)) # reserved
-    write(buffer, transcode(Byte, conn.username))
-    write(buffer, 0x0)
-    write(buffer, Byte(length(auth_response)))
-    write(buffer, auth_response)
-    write(buffer, transcode(Byte, conn.auth_plugin_name))
-    write(buffer, 0x0)
+    write(payload, reinterpret(Byte, [capability_flags])[1:4])
+    write(payload, zeros(Byte, 4)) # max packet size は 0 でいいので skip
+    write(payload, [conn.character_set_uint8])
+    write(payload, zeros(Byte, 23)) # reserved
+    write(payload, transcode(Byte, conn.username))
+    write(payload, 0x0)
+    write(payload, Byte(length(auth_response)))
+    write(payload, auth_response)
+    write(payload, transcode(Byte, conn.auth_plugin_name))
+    write(payload, 0x0)
 
-    data = buffer.data
-    return Packet(data[1:4], data[5:end])
+    return Packet(header, payload.data)
 end
 
 function execute(sock, query)
