@@ -10,15 +10,19 @@ host = string(prompt("host"))
 username = string(prompt("username"))
 password = String(Base.getpass("password").data)
 port = parse(Int, prompt("port"))
-sock = MySQLClient.connect(host, username, password, port)
+conn = MySQLClient.connect(host=host, username=username, password=password, port=3306)
 
-print("\n\n")
+println("  Welcome to the MySQL monitor")
+println("  Your MySQL connection id is $(conn.connection_id)")
+println("  Server version: $(conn.server_version)")
+
+println()
 while true
     query = Base.prompt("mysql")
     if isnothing(query) || string(query) == "quit"
         print("Bye")
         exit(0)
     end
-    MySQLClient.execute(sock, string(query))
+    MySQLClient.execute(conn, string(query))
     println()
 end

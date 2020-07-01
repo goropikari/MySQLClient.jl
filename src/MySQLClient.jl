@@ -16,15 +16,8 @@ struct Packet
     payload_length::Int
     sequence_id::Int
     payload::Vector{Byte}
-
-    function Packet(header, payload)
-        new(
-            _little_endian_int(header[1:3]),
-            Int(header[4]),
-            payload
-        )
-    end
 end
+Packet(header, payload) = Packet(_little_endian_int(header[1:3]), Int(header[4]), payload)
 
 mutable struct MySQLConnection
     sock::Sockets.TCPSocket
@@ -72,7 +65,6 @@ function connect(;host="127.0.0.1", username, password, port=3306, database="")
 
     return conn
 end
-
 
 function _handshake!(conn)
     _parse_init_packet!(conn)
