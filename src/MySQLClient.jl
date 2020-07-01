@@ -13,7 +13,7 @@ const CLIENT_PLUGIN_AUTH = 0x00080000
 const Byte = UInt8
 
 struct Packet
-    payload_payload_length::Int
+    payload_length::Int
     sequence_id::Int
     payload::Vector{Byte}
 
