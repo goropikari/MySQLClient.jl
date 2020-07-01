@@ -17,7 +17,7 @@ while true
     query = Base.prompt("mysql")
     if isnothing(query) || string(query) == "quit"
         print("Bye")
-        exit(1)
+        exit(0)
     end
     MySQLClient.execute(sock, string(query))
     println()
