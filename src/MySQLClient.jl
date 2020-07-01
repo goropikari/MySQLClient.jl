@@ -52,10 +52,14 @@ mutable struct MySQLResult
 
 end
 
-# Packet(sock) = Packet(_read_packet(sock)...)
-# Packet(conn::MySQLConnection) = Packet(_read_packet(conn.sock)...)
 function Base.write(conn::MySQLConnection, x::Vector{Byte})
     write(conn.sock, x)
+end
+function Base.write(conn::MySQLConnection, packet::Packet)
+    data = reinterpret(Byte, [packet.payload_length])[1:3]
+    push!(data, Byte(packet.sequence_id))
+    append!(data, packet.payload)
+    write(conn, data)
 end
 Base.read(conn::MySQLConnection) = read(conn.sock)
 Base.read(conn::MySQLConnection, x) = read(conn.sock, x)
@@ -73,6 +77,45 @@ end
 function _handshake!(conn)
     _parse_init_packet!(conn)
 
+    packet = _make_respose_packet(conn)
+    write(conn, packet)
+
+    header, payload = _read_packet(conn)
+    iszero(payload[1]) || error("Connection failed")
+end
+
+function _parse_init_packet!(conn)
+    init_packet = Packet(_read_packet(conn)...)
+    payload = IOBuffer(copy(init_packet.payload))
+
+    # https://dev.mysql.com/doc/internals/en/connection-phase-packets.html
+    protocol_version = Int(read(payload, 1)[])
+
+    conn.server_version = VersionNumber(String(readuntil(payload, 0x0)))
+    conn.connection_id = _little_endian_int(read(payload, 4))
+    auth_plugin_data_part1 = read(payload, 8)
+    append!(conn.auth_plugin_data, auth_plugin_data_part1)
+    filter = read(payload, 1)
+    capability_lower = read(payload, 2)
+    conn.character_set_uint8 = read(payload, 1)[]
+    status = _little_endian_int(read(payload, 2))
+    capability_upper = read(payload, 2)
+    capability = reinterpret(UInt32, vcat(capability_lower, capability_upper))[]
+
+    if capability & CLIENT_PLUGIN_AUTH > 0
+        len_auth_plugin_data = Int(read(payload, 1)[])
+        skip(payload, 10) # reserved
+
+        if capability & CLIENT_SECURE_CONNECTION > 0
+            auth_plugin_data_part2 = read(payload, max(13, len_auth_plugin_data - 8))
+            append!(conn.auth_plugin_data, auth_plugin_data_part2)
+        end
+        conn.auth_plugin_name = String(readuntil(payload, 0x0))
+    end
+end
+
+
+function _make_respose_packet(conn)
     # hankshake response packet
     #
     ## https://dev.mysql.com/doc/internals/en/secure-password-authentication.html#packet-Authentication::Native41
@@ -111,41 +154,8 @@ function _handshake!(conn)
     write(buffer, transcode(Byte, conn.auth_plugin_name))
     write(buffer, 0x0)
 
-    write(conn, buffer.data)
-
-
-    header, payload = _read_packet(conn)
-    iszero(payload[1]) || error("Connection failed")
-end
-
-function _parse_init_packet!(conn)
-    init_packet = Packet(_read_packet(conn)...)
-    payload = IOBuffer(copy(init_packet.payload))
-
-    # https://dev.mysql.com/doc/internals/en/connection-phase-packets.html
-    protocol_version = Int(read(payload, 1)[])
-
-    conn.server_version = VersionNumber(String(readuntil(payload, 0x0)))
-    conn.connection_id = _little_endian_int(read(payload, 4))
-    auth_plugin_data_part1 = read(payload, 8)
-    append!(conn.auth_plugin_data, auth_plugin_data_part1)
-    filter = read(payload, 1)
-    capability_lower = read(payload, 2)
-    conn.character_set_uint8 = read(payload, 1)[]
-    status = _little_endian_int(read(payload, 2))
-    capability_upper = read(payload, 2)
-    capability = reinterpret(UInt32, vcat(capability_lower, capability_upper))[]
-
-    if capability & CLIENT_PLUGIN_AUTH > 0
-        len_auth_plugin_data = Int(read(payload, 1)[])
-        skip(payload, 10) # reserved
-
-        if capability & CLIENT_SECURE_CONNECTION > 0
-            auth_plugin_data_part2 = read(payload, max(13, len_auth_plugin_data - 8))
-            append!(conn.auth_plugin_data, auth_plugin_data_part2)
-        end
-        conn.auth_plugin_name = String(readuntil(payload, 0x0))
-    end
+    data = buffer.data
+    return Packet(data[1:4], data[5:end])
 end
 
 function execute(sock, query)
