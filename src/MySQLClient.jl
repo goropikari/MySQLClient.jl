@@ -233,36 +233,36 @@ end
 function _read_lenenc_int(payload::Vector{Byte})
     io = IOBuffer(copy(payload))
     c = read(io, 1)[]
-    offset = 1
+    _read = 1 # number of already read bytes
     if c == 0xfb
         println("ERROR")
-        return 0, offset
+        return 0, _read
     elseif c == 0xfc
         result = _little_endian_int(read(io, 2))
-        offset = 3
+        _read += 2
     elseif c == 0xfd
         result = _little_endian_int(read(io. 3))
-        offset = 4
+        _read += 3
     elseif c == 0xfe
         result = _little_endian_int(read(io. 8))
-        offset = 9
+        _read += 8
     elseif c == 0xff
         println("ERROR PACKET")
     else
         result = Int64(c)
     end
 
-    return result, offset
+    return result, _read
 end
 
 function _read_lenenc_str(payload::Vector{Byte})
     payload = copy(payload)
-    len, offset = _read_lenenc_int(payload)
-    offset += 1
+    strlen, _read = _read_lenenc_int(payload)
+    offset = _read + 1
 
-    result = payload[offset:offset+len-1]
+    result = payload[offset : offset+strlen-1]
 
-    return String(result), offset + len - 1
+    return String(result), _read + strlen
 end
 
 end # module
