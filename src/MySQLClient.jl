@@ -3,12 +3,35 @@ module MySQLClient
 import Sockets
 import SHA
 
-const CLIENT_PROTOCOL_41 = 0x0200
-const CLIENT_SECURE_CONNECTION = 0x8000
-const CLIENT_LONG_PASSWORD = 0x0004
-const CLIENT_TRANSACTIONS = 0x2000
-const CLIENT_LONG_FLAG = 0x0004
+const CLIENT_LONG_PASSWORD = 0x00000001
+const CLIENT_FOUND_ROWS = 0x00000002
+const CLIENT_LONG_FLAG = 0x00000004
+const CLIENT_CONNECT_WITH_DB = 0x00000008
+const CLIENT_NO_SCHEMA = 0x00000010
+const CLIENT_COMPRESS = 0x00000020
+const CLIENT_ODBC = 0x00000040
+const CLIENT_LOCAL_FILES = 0x00000080
+const CLIENT_IGNORE_SPACE = 0x00000100
+const CLIENT_PROTOCOL_41 = 0x00000200
+const CLIENT_INTERACTIVE = 0x00000400
+const CLIENT_SSL = 0x00000800
+const CLIENT_IGNORE_SIGPIPE = 0x00001000
+const CLIENT_TRANSACTIONS = 0x00002000
+const CLIENT_RESERVED = 0x00004000
+const CLIENT_SECURE_CONNECTION = 0x00008000
+const CLIENT_MULTI_STATEMENTS = 0x00010000
+const CLIENT_MULTI_RESULTS = 0x00020000
+const CLIENT_PS_MULTI_RESULTS = 0x00040000
 const CLIENT_PLUGIN_AUTH = 0x00080000
+const CLIENT_CONNECT_ATTRS = 0x00100000
+const CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA = 0x00200000
+const CLIENT_CAN_HANDLE_EXPIRED_PASSWORDS = 0x00400000
+const CLIENT_SESSION_TRACK = 0x00800000
+const CLIENT_DEPRECATE_EOF = 0x01000000
+
+const SERVER_SESSION_STATE_CHANGED = 0x4000
+
+const OK_PACKET = 0x00
 const ERROR_PACKET = 0xff
 
 const Byte = UInt8
@@ -31,6 +54,7 @@ mutable struct MySQLConnection
     server_version::VersionNumber
     character_set_uint8::Byte
     connection_id::Integer
+    capability::UInt32
     sequence_id::Byte
     auth_plugin_name::String
     auth_plugin_data::Vector{Byte}
@@ -46,6 +70,7 @@ mutable struct MySQLConnection
                              server_version=v"0.0.0",
                              character_set_uint8=0x00,
                              connection_id=-1,
+                             capability=UInt32(0),
                              sequence_id=0x01,
                              auth_plugin_name="",
                              auth_plugin_data=UInt8[],
@@ -61,6 +86,7 @@ mutable struct MySQLConnection
         conn.server_version = server_version
         conn.character_set_uint8 = character_set_uint8
         conn.connection_id = connection_id
+        conn.capability = capability
         conn.sequence_id = sequence_id
         conn.auth_plugin_name = auth_plugin_name
         conn.auth_plugin_data = auth_plugin_data
@@ -117,13 +143,13 @@ function _parse_init_packet!(conn)
     conn.character_set_uint8 = read(payload, 1)[]
     status = _little_endian_int(read(payload, 2))
     capability_upper = read(payload, 2)
-    capability = reinterpret(UInt32, vcat(capability_lower, capability_upper))[]
+    conn.capability = reinterpret(UInt32, vcat(capability_lower, capability_upper))[]
 
-    if capability & CLIENT_PLUGIN_AUTH > 0
+    if conn.capability & CLIENT_PLUGIN_AUTH > 0
         len_auth_plugin_data = Int(read(payload, 1)[])
         skip(payload, 10) # reserved
 
-        if capability & CLIENT_SECURE_CONNECTION > 0
+        if conn.capability & CLIENT_SECURE_CONNECTION > 0
             auth_plugin_data_part2 = read(payload, max(13, len_auth_plugin_data - 8))
             append!(conn.auth_plugin_data, auth_plugin_data_part2)
         end
@@ -180,18 +206,57 @@ function _make_auth_response(conn)
     return auth_response
 end
 
-function execute(sock, query)
-    write(sock, _com_query(query))
+function execute(conn::MySQLConnection, query)
+    write(conn.sock, _com_query(query))
 
-    packet = MySQLPacket(_read_packet(sock)...)
+    packet = MySQLPacket(_read_packet(conn.sock)...)
 
-    payload = copy(packet.payload)
+    payload = copy(packet.payload) # UInt8[0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00]
     if payload[1] == 0x00
-        println("OK")
+        # https://dev.mysql.com/doc/internals/en/packet-OK_Packet.html
+        # OK Packet
         println(payload)
+        offset = 2
+        affected_rows, _read = _read_lenenc_int(payload[offset:end])
+        offset += _read
+        last_insert_id, _read = _read_lenenc_int(payload[offset:end])
+        offset += _read
+
+        status_flags = UInt16(0)
+        warnings = UInt16(0)
+        # mysql_native_password
+        if conn.capability &  CLIENT_PROTOCOL_41 > 0
+            status_flags = reinterpret(UInt16, payload[offset:offset+1])[]
+            offset += 2
+            warnings = reinterpret(UInt16, payload[offset:offset+1])
+            offset += 2
+        elseif conn.capability & CLIENT_TRANSACTIONS > 0
+            status_flags = reinterpret(UInt16, payload[offset:offset+1])[]
+            offset += 2
+        end
+
+        # if conn.capability & CLIENT_SESSION_TRACK > 0
+        #     @show info, _read = _read_lenenc_str(payload[offset:end])
+        #     offset += _read + 1
+        #
+        #     if conn.capability & SERVER_SESSION_STATE_CHANGED > 0
+        #         session_state_changes, _read = _read_lenenc_str(payload[offset:end])
+        #         offset += _read
+        #     end
+        # else
+        #     info = String(payload[offset:end])
+        # end
+
+        @show affected_rows
+        @show last_insert_id
+        @show status_flags
+        @show warnings
+        # @show info
+
         return
     elseif payload[1] == 0xff
         # https://dev.mysql.com/doc/internals/en/packet-ERR_Packet.html
+        # ERROR Packet
         offset = 2
         error_code = _little_endian_int(payload[offset:offset+1])
         offset += 2
@@ -203,12 +268,12 @@ function execute(sock, query)
         error("$(error_code) ($(sql_state)) $(error_message)") # TODO: Make MySQLERROR
         return
     end
-    column_count, _, _ = _read_lenenc_int(payload)
+    column_count, _ = _read_lenenc_int(payload)
 
     # schema information
     col_names = String[]
     while (true)
-        packet = MySQLPacket(_read_packet(sock)...)
+        packet = MySQLPacket(_read_packet(conn.sock)...)
         payload = copy(packet.payload)
         if payload[1] == 0xfe
             break
@@ -252,7 +317,7 @@ function execute(sock, query)
 
     # values
     while (true)
-        packet = MySQLPacket(_read_packet(sock)...)
+        packet = MySQLPacket(_read_packet(conn.sock)...)
         payload = copy(packet.payload)
         if payload[1] == 0xfe
             break
@@ -267,7 +332,7 @@ function execute(sock, query)
         end
     end
 end
-execute(conn::MySQLConnection, query) = execute(conn.sock, query)
+# execute(conn::MySQLConnection, query) = execute(conn.sock, query)
 
 function _read_packet(sock)
     header = read(sock, 4)
@@ -325,12 +390,12 @@ function _read_lenenc_int(payload::Vector{Byte})
         result = Int64(c)
     end
 
-    return result, _read, c
+    return result, _read
 end
 
 function _read_lenenc_str(payload::Vector{Byte})
     payload = copy(payload)
-    strlen, _read, err = _read_lenenc_int(payload)
+    strlen, _read = _read_lenenc_int(payload)
     offset = _read + 1
     result = payload[offset : offset+strlen-1]
 
