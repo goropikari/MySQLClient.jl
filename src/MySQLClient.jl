@@ -217,7 +217,15 @@ end
 
 # https://dev.mysql.com/doc/internals/en/initial-handshake.html
 function _handshake!(conn::MySQLConnection)
-    _parse_init_packet!(conn)
+    init_packet = MySQLPacket(_read_packet(conn)...)
+    server_version, connection_id, character_set_uint8, capability, auth_plugin_data, auth_plugin_name = _parse_init_packet(init_packet)
+    conn.server_version = server_version
+    conn.connection_id = connection_id
+    conn.character_set_uint8 = character_set_uint8
+    conn.capability = capability
+    conn.auth_plugin_data = auth_plugin_data
+    conn.auth_plugin_name = auth_plugin_name
+
     response_packet, sequence_id = _make_handshake_response_packet(conn.username,
                                                         conn.password,
                                                         conn.auth_plugin_name,
@@ -233,34 +241,36 @@ function _handshake!(conn::MySQLConnection)
 end
 
 # https://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::HandshakeV10
-function _parse_init_packet!(conn::MySQLConnection)
-    init_packet = MySQLPacket(_read_packet(conn)...)
+function _parse_init_packet(init_packet)
     payload = IOBuffer(copy(init_packet.payload))
 
     # https://dev.mysql.com/doc/internals/en/connection-phase-packets.html
     protocol_version = Int(read(payload, 1)[])
 
-    conn.server_version = VersionNumber(String(readuntil(payload, 0x0)))
-    conn.connection_id = _little_endian_int(read(payload, 4))
+    server_version = VersionNumber(String(readuntil(payload, 0x0)))
+    connection_id = _little_endian_int(read(payload, 4))
+    auth_plugin_data = UInt8[]
     auth_plugin_data_part1 = read(payload, 8)
-    append!(conn.auth_plugin_data, auth_plugin_data_part1)
+    append!(auth_plugin_data, auth_plugin_data_part1)
     filter = read(payload, 1)
     capability_lower = read(payload, 2)
-    conn.character_set_uint8 = read(payload, 1)[]
+    character_set_uint8 = read(payload, 1)[]
     status = _little_endian_int(read(payload, 2))
     capability_upper = read(payload, 2)
-    conn.capability = reinterpret(UInt32, vcat(capability_lower, capability_upper))[]
+    capability = reinterpret(UInt32, vcat(capability_lower, capability_upper))[]
 
-    if conn.capability & CLIENT_PLUGIN_AUTH > 0
+    if capability & CLIENT_PLUGIN_AUTH > 0
         len_auth_plugin_data = Int(read(payload, 1)[])
         skip(payload, 10) # reserved
 
-        if conn.capability & CLIENT_SECURE_CONNECTION > 0
+        if capability & CLIENT_SECURE_CONNECTION > 0
             auth_plugin_data_part2 = read(payload, max(13, len_auth_plugin_data - 8))
-            append!(conn.auth_plugin_data, auth_plugin_data_part2)
+            append!(auth_plugin_data, auth_plugin_data_part2)
         end
-        conn.auth_plugin_name = String(readuntil(payload, 0x0))
+        auth_plugin_name = String(readuntil(payload, 0x0))
     end
+
+    return server_version, connection_id, character_set_uint8, capability, auth_plugin_data, auth_plugin_name
 end
 
 # hankshake response packet
