@@ -188,10 +188,24 @@ function execute(sock, query)
     payload = copy(packet.payload)
     if payload[1] == 0x00
         println("OK")
+        println(payload)
+        return
+    elseif payload[1] == 0xff
+        # https://dev.mysql.com/doc/internals/en/packet-ERR_Packet.html
+        offset = 2
+        error_code = _little_endian_int(payload[offset:offset+1])
+        offset += 2
+        sql_state_marker = String([payload[offset]])
+        offset += 1
+        sql_state = String(payload[offset:offset+4])
+        offset += 5
+        error_message = String(payload[offset:end])
+        error("$(error_code) ($(sql_state)) $(error_message)") # TODO: Make MySQLERROR
         return
     end
     column_count, _, _ = _read_lenenc_int(payload)
 
+    # schema information
     col_names = String[]
     while (true)
         packet = MySQLPacket(_read_packet(sock)...)
@@ -226,7 +240,7 @@ function execute(sock, query)
             offset += 2
             decimals = payload[offset]
             offset += 1
-            @show catalog, schema, table, org_table, col_name, org_name, character_set, column_length, column_type, flags, decimals
+            # @show catalog, schema, table, org_table, col_name, org_name, character_set, column_length, column_type, flags, decimals
         end
     end
 
@@ -236,6 +250,7 @@ function execute(sock, query)
     println()
     println("-"^30)
 
+    # values
     while (true)
         packet = MySQLPacket(_read_packet(sock)...)
         payload = copy(packet.payload)
