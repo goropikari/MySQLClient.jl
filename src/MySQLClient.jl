@@ -3,36 +3,34 @@ module MySQLClient
 import Sockets
 import SHA
 
-const CLIENT_LONG_PASSWORD = 0x00000001
-const CLIENT_FOUND_ROWS = 0x00000002
-const CLIENT_LONG_FLAG = 0x00000004
-const CLIENT_CONNECT_WITH_DB = 0x00000008
-const CLIENT_NO_SCHEMA = 0x00000010
-const CLIENT_COMPRESS = 0x00000020
-const CLIENT_ODBC = 0x00000040
-const CLIENT_LOCAL_FILES = 0x00000080
-const CLIENT_IGNORE_SPACE = 0x00000100
-const CLIENT_PROTOCOL_41 = 0x00000200
-const CLIENT_INTERACTIVE = 0x00000400
-const CLIENT_SSL = 0x00000800
-const CLIENT_IGNORE_SIGPIPE = 0x00001000
-const CLIENT_TRANSACTIONS = 0x00002000
-const CLIENT_RESERVED = 0x00004000
-const CLIENT_SECURE_CONNECTION = 0x00008000
-const CLIENT_MULTI_STATEMENTS = 0x00010000
-const CLIENT_MULTI_RESULTS = 0x00020000
-const CLIENT_PS_MULTI_RESULTS = 0x00040000
-const CLIENT_PLUGIN_AUTH = 0x00080000
-const CLIENT_CONNECT_ATTRS = 0x00100000
+const CLIENT_LONG_PASSWORD                  = 0x00000001
+const CLIENT_FOUND_ROWS                     = 0x00000002
+const CLIENT_LONG_FLAG                      = 0x00000004
+const CLIENT_CONNECT_WITH_DB                = 0x00000008
+const CLIENT_NO_SCHEMA                      = 0x00000010
+const CLIENT_COMPRESS                       = 0x00000020
+const CLIENT_ODBC                           = 0x00000040
+const CLIENT_LOCAL_FILES                    = 0x00000080
+const CLIENT_IGNORE_SPACE                   = 0x00000100
+const CLIENT_PROTOCOL_41                    = 0x00000200
+const CLIENT_INTERACTIVE                    = 0x00000400
+const CLIENT_SSL                            = 0x00000800
+const CLIENT_IGNORE_SIGPIPE                 = 0x00001000
+const CLIENT_TRANSACTIONS                   = 0x00002000
+const CLIENT_RESERVED                       = 0x00004000
+const CLIENT_SECURE_CONNECTION              = 0x00008000
+const CLIENT_MULTI_STATEMENTS               = 0x00010000
+const CLIENT_MULTI_RESULTS                  = 0x00020000
+const CLIENT_PS_MULTI_RESULTS               = 0x00040000
+const CLIENT_PLUGIN_AUTH                    = 0x00080000
+const CLIENT_CONNECT_ATTRS                  = 0x00100000
 const CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA = 0x00200000
-const CLIENT_CAN_HANDLE_EXPIRED_PASSWORDS = 0x00400000
-const CLIENT_SESSION_TRACK = 0x00800000
-const CLIENT_DEPRECATE_EOF = 0x01000000
-
-const SERVER_SESSION_STATE_CHANGED = 0x4000
-
-const OK_PACKET_HEADER = 0x00
-const ERROR_PACKET_HEADER = 0xff
+const CLIENT_CAN_HANDLE_EXPIRED_PASSWORDS   = 0x00400000
+const CLIENT_SESSION_TRACK                  = 0x00800000
+const CLIENT_DEPRECATE_EOF                  = 0x01000000
+const SERVER_SESSION_STATE_CHANGED          = 0x4000
+const OK_PACKET_HEADER                      = 0x00
+const ERROR_PACKET_HEADER                   = 0xff
 
 const Byte = UInt8
 
@@ -75,22 +73,23 @@ mutable struct MySQLConnection
                              auth_plugin_name="",
                              auth_plugin_data=UInt8[],
                              ssl=false)
-        conn = new()
-        conn.sock = sock
-        conn.host = host
-        conn.port = port
-        conn.username = username
-        conn.password = password
-        conn.database = database
-        conn.protocol_version = protocol_version
-        conn.server_version = server_version
+
+        conn                     = new()
+        conn.sock                = sock
+        conn.host                = host
+        conn.port                = port
+        conn.username            = username
+        conn.password            = password
+        conn.database            = database
+        conn.protocol_version    = protocol_version
+        conn.server_version      = server_version
         conn.character_set_uint8 = character_set_uint8
-        conn.connection_id = connection_id
-        conn.capability = capability
-        conn.sequence_id = sequence_id
-        conn.auth_plugin_name = auth_plugin_name
-        conn.auth_plugin_data = auth_plugin_data
-        conn.ssl = ssl
+        conn.connection_id       = connection_id
+        conn.capability          = capability
+        conn.sequence_id         = sequence_id
+        conn.auth_plugin_name    = auth_plugin_name
+        conn.auth_plugin_data    = auth_plugin_data
+        conn.ssl                 = ssl
 
         return conn
     end
@@ -106,9 +105,9 @@ function Base.write(conn::MySQLConnection, packet::MySQLPacket)
     append!(data, packet.payload)
     write(conn, data)
 end
-Base.read(conn::MySQLConnection) = read(conn.sock)
+Base.read(conn::MySQLConnection)    = read(conn.sock)
 Base.read(conn::MySQLConnection, x) = read(conn.sock, x)
-Base.isopen(conn::MySQLConnection) = isopen(conn.sock)
+Base.isopen(conn::MySQLConnection)  = isopen(conn.sock)
 
 function connect(;host="127.0.0.1", username, password="", port=3306, database="")
     sock = Sockets.connect(host, port)
@@ -128,7 +127,7 @@ function execute(conn::MySQLConnection, query)
     write(conn.sock, _com_query(query))
 
     # https://dev.mysql.com/doc/internals/en/com-query-response.html
-    packet = MySQLPacket(_read_packet(conn.sock)...)
+    packet = MySQLPacket(_read_packet(conn)...)
     payload = copy(packet.payload)
     if payload[1] == OK_PACKET_HEADER
         _parse_ok_packet(payload, conn.capability)
@@ -148,7 +147,7 @@ function execute(conn::MySQLConnection, query)
     # https://dev.mysql.com/doc/internals/en/com-field-list-response.html
     col_names = String[]
     while (true)
-        packet = MySQLPacket(_read_packet(conn.sock)...)
+        packet = MySQLPacket(_read_packet(conn)...)
         payload = copy(packet.payload)
         if payload[1] == 0xfe
             # https://dev.mysql.com/doc/internals/en/packet-EOF_Packet.html
@@ -195,7 +194,7 @@ function execute(conn::MySQLConnection, query)
     # row
     # https://dev.mysql.com/doc/internals/en/com-query-response.html#packet-ProtocolText::ResultsetRow
     while (true)
-        packet = MySQLPacket(_read_packet(conn.sock)...)
+        packet = MySQLPacket(_read_packet(conn)...)
         payload = copy(packet.payload)
         if payload[1] == 0xfe
             break
@@ -218,20 +217,20 @@ end
 # https://dev.mysql.com/doc/internals/en/initial-handshake.html
 function _handshake!(conn::MySQLConnection)
     init_packet = MySQLPacket(_read_packet(conn)...)
-    server_version, connection_id, character_set_uint8, capability, auth_plugin_data, auth_plugin_name = _parse_init_packet(init_packet)
-    conn.server_version = server_version
-    conn.connection_id = connection_id
-    conn.character_set_uint8 = character_set_uint8
-    conn.capability = capability
-    conn.auth_plugin_data = auth_plugin_data
-    conn.auth_plugin_name = auth_plugin_name
+    params = _parse_init_packet(init_packet)
+    conn.server_version      = params.server_version
+    conn.connection_id       = params.connection_id
+    conn.character_set_uint8 = params.character_set_uint8
+    conn.capability          = params.capability
+    conn.auth_plugin_data    = params.auth_plugin_data
+    conn.auth_plugin_name    = params.auth_plugin_name
 
     response_packet, sequence_id = _make_handshake_response_packet(conn.username,
-                                                        conn.password,
-                                                        conn.auth_plugin_name,
-                                                        conn.auth_plugin_data,
-                                                        conn.sequence_id,
-                                                        conn.character_set_uint8)
+                                                                   conn.password,
+                                                                   conn.auth_plugin_name,
+                                                                   conn.auth_plugin_data,
+                                                                   conn.sequence_id,
+                                                                   conn.character_set_uint8)
     conn.sequence_id = sequence_id
     write(conn, response_packet)
     header, payload = _read_packet(conn)
@@ -270,7 +269,12 @@ function _parse_init_packet(init_packet)
         auth_plugin_name = String(readuntil(payload, 0x0))
     end
 
-    return server_version, connection_id, character_set_uint8, capability, auth_plugin_data, auth_plugin_name
+    return (; :server_version      => server_version,
+              :connection_id       => connection_id,
+              :character_set_uint8 => character_set_uint8,
+              :capability          => capability,
+              :auth_plugin_data    => auth_plugin_data,
+              :auth_plugin_name    => auth_plugin_name)
 end
 
 # hankshake response packet
