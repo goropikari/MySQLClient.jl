@@ -112,109 +112,26 @@ Base.isopen(conn::MySQLConnection) = isopen(conn.sock)
 
 function connect(;host="127.0.0.1", username, password="", port=3306, database="")
     sock = Sockets.connect(host, port)
-    conn = MySQLConnection(sock=sock, host=host, port=port, username=username, password=password, database=database)
+    conn = MySQLConnection(sock=sock,
+                           host=host,
+                           port=port,
+                           username=username,
+                           password=password,
+                           database=database)
     _handshake!(conn)
 
     return conn
 end
 
-function _handshake!(conn)
-    _parse_init_packet!(conn)
-    write(conn, _make_respose_packet(conn))
-    header, payload = _read_packet(conn)
-    iszero(payload[1]) || error("Connection failed")
-
-    return nothing
-end
-
-function _parse_init_packet!(conn)
-    init_packet = MySQLPacket(_read_packet(conn)...)
-    payload = IOBuffer(copy(init_packet.payload))
-
-    # https://dev.mysql.com/doc/internals/en/connection-phase-packets.html
-    protocol_version = Int(read(payload, 1)[])
-
-    conn.server_version = VersionNumber(String(readuntil(payload, 0x0)))
-    conn.connection_id = _little_endian_int(read(payload, 4))
-    auth_plugin_data_part1 = read(payload, 8)
-    append!(conn.auth_plugin_data, auth_plugin_data_part1)
-    filter = read(payload, 1)
-    capability_lower = read(payload, 2)
-    conn.character_set_uint8 = read(payload, 1)[]
-    status = _little_endian_int(read(payload, 2))
-    capability_upper = read(payload, 2)
-    conn.capability = reinterpret(UInt32, vcat(capability_lower, capability_upper))[]
-
-    if conn.capability & CLIENT_PLUGIN_AUTH > 0
-        len_auth_plugin_data = Int(read(payload, 1)[])
-        skip(payload, 10) # reserved
-
-        if conn.capability & CLIENT_SECURE_CONNECTION > 0
-            auth_plugin_data_part2 = read(payload, max(13, len_auth_plugin_data - 8))
-            append!(conn.auth_plugin_data, auth_plugin_data_part2)
-        end
-        conn.auth_plugin_name = String(readuntil(payload, 0x0))
-    end
-end
-
-# hankshake response packet
-function _make_respose_packet(conn)
-    auth_response = _make_auth_response(conn)
-
-    # calc payload size
-    payload_size = 4 + 4 + 1 + 23 # capability flags, max-packet size, character_set, reserved
-    payload_size += length(conn.username) + 1 # 1 = null termination
-    payload_size += 1 # length of auth-response
-    payload_size += length(auth_response)
-    payload_size += length(conn.auth_plugin_name) + 1 # 1 = null termination
-    payload = IOBuffer(maxsize=payload_size)
-
-    # Make header
-    header = vcat(reinterpret(Byte, [payload_size])[1:3], conn.sequence_id)
-    conn.sequence_id = mod1(conn.sequence_id + 0x01, 0xff)
-
-    # payload
-    capability_flags = Int32(CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION
-                             | CLIENT_LONG_PASSWORD | CLIENT_TRANSACTIONS
-                             | CLIENT_LONG_FLAG)
-    write(payload, reinterpret(Byte, [capability_flags]))
-    write(payload, zeros(Byte, 4)) # max packet size は 0 でいいので skip
-    write(payload, [conn.character_set_uint8])
-    write(payload, zeros(Byte, 23)) # reserved
-    write(payload, transcode(Byte, conn.username))
-    write(payload, 0x0)
-    write(payload, Byte(length(auth_response)))
-    write(payload, auth_response)
-    write(payload, transcode(Byte, conn.auth_plugin_name))
-    write(payload, 0x0)
-
-    return MySQLPacket(header, payload.data)
-end
-
-function _make_auth_response(conn)
-    auth_response = UInt8[]
-    if conn.auth_plugin_name == "mysql_native_password"
-        # https://dev.mysql.com/doc/internals/en/secure-password-authentication.html#packet-Authentication::Native41
-        # sha1(password) xor concat("20-bytes random data from server", sha1(sha1(password)))
-        random_data = conn.auth_plugin_data[1:20]
-        auth_response = SHA.sha1(SHA.sha1(conn.password))
-        auth_response = vcat(random_data, auth_response)
-        auth_response = SHA.sha1(auth_response)
-        auth_response = xor.(SHA.sha1(conn.password), auth_response)
-    end
-
-    return auth_response
-end
-
 function execute(conn::MySQLConnection, query)
+    # https://dev.mysql.com/doc/internals/en/com-query.html
     write(conn.sock, _com_query(query))
 
     # https://dev.mysql.com/doc/internals/en/com-query-response.html
     packet = MySQLPacket(_read_packet(conn.sock)...)
     payload = copy(packet.payload)
     if payload[1] == OK_PACKET_HEADER
-        @show _parse_ok_packet(payload, conn.capability)
-
+        _parse_ok_packet(payload, conn.capability)
         return
     elseif payload[1] == ERROR_PACKET_HEADER
         error_code, sql_state, error_message = _parse_error_packet(payload, conn.capability)
@@ -249,10 +166,10 @@ function execute(conn::MySQLConnection, query)
             offset += _read
             org_table, _read = _lenenc_str(payload[offset:end]) # physical table-name
             offset += _read
-            @show col_name, _read = _lenenc_str(payload[offset:end]) # virtual column name
+            col_name, _read = _lenenc_str(payload[offset:end]) # virtual column name
             push!(col_names, col_name)
             offset += _read
-            @show org_name, _read = _lenenc_str(payload[offset:end]) # physical column name
+            org_name, _read = _lenenc_str(payload[offset:end]) # physical column name
             offset += _read
             offset += 1 # length of fixed length fields
             character_set = _little_endian_int(payload[offset:offset+1])
@@ -265,7 +182,7 @@ function execute(conn::MySQLConnection, query)
             offset += 2
             decimals = payload[offset]
             offset += 1
-            @show catalog, schema, table, org_table, col_name, org_name, character_set, column_length, column_type, flags, decimals
+            # catalog, schema, table, org_table, col_name, org_name, character_set, column_length, column_type, flags, decimals
         end
     end
 
@@ -292,6 +209,130 @@ function execute(conn::MySQLConnection, query)
             println()
         end
     end
+end
+
+####################
+# Connection Phase
+####################
+
+# https://dev.mysql.com/doc/internals/en/initial-handshake.html
+function _handshake!(conn::MySQLConnection)
+    _parse_init_packet!(conn)
+    response_packet, sequence_id = _make_handshake_response_packet(conn.username,
+                                                        conn.password,
+                                                        conn.auth_plugin_name,
+                                                        conn.auth_plugin_data,
+                                                        conn.sequence_id,
+                                                        conn.character_set_uint8)
+    conn.sequence_id = sequence_id
+    write(conn, response_packet)
+    header, payload = _read_packet(conn)
+    iszero(payload[1]) || error("Connection failed")
+
+    return nothing
+end
+
+# https://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::HandshakeV10
+function _parse_init_packet!(conn::MySQLConnection)
+    init_packet = MySQLPacket(_read_packet(conn)...)
+    payload = IOBuffer(copy(init_packet.payload))
+
+    # https://dev.mysql.com/doc/internals/en/connection-phase-packets.html
+    protocol_version = Int(read(payload, 1)[])
+
+    conn.server_version = VersionNumber(String(readuntil(payload, 0x0)))
+    conn.connection_id = _little_endian_int(read(payload, 4))
+    auth_plugin_data_part1 = read(payload, 8)
+    append!(conn.auth_plugin_data, auth_plugin_data_part1)
+    filter = read(payload, 1)
+    capability_lower = read(payload, 2)
+    conn.character_set_uint8 = read(payload, 1)[]
+    status = _little_endian_int(read(payload, 2))
+    capability_upper = read(payload, 2)
+    conn.capability = reinterpret(UInt32, vcat(capability_lower, capability_upper))[]
+
+    if conn.capability & CLIENT_PLUGIN_AUTH > 0
+        len_auth_plugin_data = Int(read(payload, 1)[])
+        skip(payload, 10) # reserved
+
+        if conn.capability & CLIENT_SECURE_CONNECTION > 0
+            auth_plugin_data_part2 = read(payload, max(13, len_auth_plugin_data - 8))
+            append!(conn.auth_plugin_data, auth_plugin_data_part2)
+        end
+        conn.auth_plugin_name = String(readuntil(payload, 0x0))
+    end
+end
+
+# hankshake response packet
+# https://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::HandshakeResponse41
+function _make_handshake_response_packet(username,
+                              password,
+                              auth_plugin_name,
+                              auth_plugin_data,
+                              sequence_id,
+                              character_set_uint8)
+    auth_response = _make_auth_response(auth_plugin_name, auth_plugin_data, password)
+
+    # calc payload size
+    payload_size = 4 + 4 + 1 + 23 # capability flags, max-packet size, character_set, reserved
+    payload_size += length(username) + 1 # 1 = null termination
+    payload_size += 1 # length of auth-response
+    payload_size += length(auth_response)
+    payload_size += length(auth_plugin_name) + 1 # 1 = null termination
+    payload = IOBuffer(maxsize=payload_size)
+
+    # Make header
+    header = vcat(reinterpret(Byte, [payload_size])[1:3], sequence_id)
+    sequence_id = mod1(sequence_id + 0x01, 0xff)
+
+    # payload
+    capability_flags = Int32(CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION
+                             | CLIENT_LONG_PASSWORD | CLIENT_TRANSACTIONS
+                             | CLIENT_LONG_FLAG)
+    write(payload, reinterpret(Byte, [capability_flags]))
+    write(payload, zeros(Byte, 4)) # max packet size は 0 でいいので skip
+    write(payload, [character_set_uint8])
+    write(payload, zeros(Byte, 23)) # reserved
+    write(payload, transcode(Byte, username))
+    write(payload, 0x0)
+    write(payload, Byte(length(auth_response)))
+    write(payload, auth_response)
+    write(payload, transcode(Byte, auth_plugin_name))
+    write(payload, 0x0)
+
+    return MySQLPacket(header, payload.data), sequence_id
+end
+
+# https://dev.mysql.com/doc/internals/en/secure-password-authentication.html#packet-Authentication::Native41
+function _make_auth_response(auth_plugin_name, auth_plugin_data, password)
+    auth_response = UInt8[]
+    if auth_plugin_name == "mysql_native_password"
+        # sha1(password) xor concat("20-bytes random data from server", sha1(sha1(password)))
+        random_data = auth_plugin_data[1:20]
+        auth_response = SHA.sha1(SHA.sha1(password))
+        auth_response = vcat(random_data, auth_response)
+        auth_response = SHA.sha1(auth_response)
+        auth_response = xor.(SHA.sha1(password), auth_response)
+    end
+
+    return auth_response
+end
+
+
+################
+# Command Phase
+################
+
+# https://dev.mysql.com/doc/internals/en/com-query.html
+function _com_query(query)
+    payload_size = length(query) + 1 # 1 = for command_id
+    buffer = IOBuffer(maxsize=payload_size+4)
+    write(buffer, reinterpret(UInt8, [payload_size])[1:3])
+    write(buffer, 0x00) # sequence_id
+    write(buffer, 0x03) # command_id
+    write(buffer, transcode(UInt8, query))
+
+    return buffer.data
 end
 
 # OK Packet
@@ -347,6 +388,9 @@ function _parse_error_packet(payload, capability)
     return error_code, sql_state, error_message
 end
 
+##################
+# Utilities
+##################
 function _read_packet(sock)
     header = read(sock, 4)
     payload_size = _little_endian_int(header[1:3])
@@ -362,18 +406,6 @@ function _little_endian_int(arr::Vector{Byte})
         num += Int64(c) << (8 * (i - 1))
     end
     return num
-end
-
-# https://dev.mysql.com/doc/internals/en/com-query.html
-function _com_query(query)
-    payload_size = length(query) + 1 # 1 = for command_id
-    buffer = IOBuffer(maxsize=payload_size+4)
-    write(buffer, reinterpret(UInt8, [payload_size])[1:3])
-    write(buffer, 0x00) # sequence_id
-    write(buffer, 0x03) # command_id
-    write(buffer, transcode(UInt8, query))
-
-    return buffer.data
 end
 
 # https://dev.mysql.com/doc/internals/en/integer.html#packet-Protocol::LengthEncodedInteger
@@ -405,6 +437,7 @@ function _lenenc_int(payload::Vector{Byte})
     return result, _read
 end
 
+# https://dev.mysql.com/doc/internals/en/string.html#packet-Protocol::LengthEncodedString
 function _lenenc_str(payload::Vector{Byte})
     payload = copy(payload)
     strlen, _read = _lenenc_int(payload)
@@ -413,6 +446,5 @@ function _lenenc_str(payload::Vector{Byte})
 
     return String(result), _read + strlen
 end
-
 
 end # module
