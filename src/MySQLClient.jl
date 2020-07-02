@@ -31,8 +31,8 @@ const CLIENT_DEPRECATE_EOF = 0x01000000
 
 const SERVER_SESSION_STATE_CHANGED = 0x4000
 
-const OK_PACKET = 0x00
-const ERROR_PACKET = 0xff
+const OK_PACKET_HEADER = 0x00
+const ERROR_PACKET_HEADER = 0xff
 
 const Byte = UInt8
 
@@ -211,64 +211,17 @@ function execute(conn::MySQLConnection, query)
 
     packet = MySQLPacket(_read_packet(conn.sock)...)
 
-    payload = copy(packet.payload) # UInt8[0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00]
-    if payload[1] == 0x00
-        # https://dev.mysql.com/doc/internals/en/packet-OK_Packet.html
-        # OK Packet
-        println(payload)
-        offset = 2
-        affected_rows, _read = _read_lenenc_int(payload[offset:end])
-        offset += _read
-        last_insert_id, _read = _read_lenenc_int(payload[offset:end])
-        offset += _read
-
-        status_flags = UInt16(0)
-        warnings = UInt16(0)
-        # mysql_native_password
-        if conn.capability &  CLIENT_PROTOCOL_41 > 0
-            status_flags = reinterpret(UInt16, payload[offset:offset+1])[]
-            offset += 2
-            warnings = reinterpret(UInt16, payload[offset:offset+1])
-            offset += 2
-        elseif conn.capability & CLIENT_TRANSACTIONS > 0
-            status_flags = reinterpret(UInt16, payload[offset:offset+1])[]
-            offset += 2
-        end
-
-        # if conn.capability & CLIENT_SESSION_TRACK > 0
-        #     @show info, _read = _read_lenenc_str(payload[offset:end])
-        #     offset += _read + 1
-        #
-        #     if conn.capability & SERVER_SESSION_STATE_CHANGED > 0
-        #         session_state_changes, _read = _read_lenenc_str(payload[offset:end])
-        #         offset += _read
-        #     end
-        # else
-        #     info = String(payload[offset:end])
-        # end
-
-        @show affected_rows
-        @show last_insert_id
-        @show status_flags
-        @show warnings
-        # @show info
+    payload = copy(packet.payload)
+    if payload[1] == OK_PACKET_HEADER
+        @show _parse_ok_packet(payload, conn.capability)
 
         return
-    elseif payload[1] == 0xff
-        # https://dev.mysql.com/doc/internals/en/packet-ERR_Packet.html
-        # ERROR Packet
-        offset = 2
-        error_code = _little_endian_int(payload[offset:offset+1])
-        offset += 2
-        sql_state_marker = String([payload[offset]])
-        offset += 1
-        sql_state = String(payload[offset:offset+4])
-        offset += 5
-        error_message = String(payload[offset:end])
+    elseif payload[1] == ERROR_PACKET_HEADER
+        error_code, sql_state, error_message = _parse_error_packet(payload, conn.capability)
         error("$(error_code) ($(sql_state)) $(error_message)") # TODO: Make MySQLERROR
         return
     end
-    column_count, _ = _read_lenenc_int(payload)
+    column_count, _ = _lenenc_int(payload)
 
     # schema information
     col_names = String[]
@@ -281,19 +234,19 @@ function execute(conn::MySQLConnection, query)
             error("Unsupported query result")
         else
             offset = 1
-            catalog, len = _read_lenenc_str(payload[offset:end])
-            offset += len
-            schema, len = _read_lenenc_str(payload[offset:end])
-            offset += len
-            table, len = _read_lenenc_str(payload[offset:end])
-            offset += len
-            org_table, len = _read_lenenc_str(payload[offset:end])
-            offset += len
-            col_name, len = _read_lenenc_str(payload[offset:end])
+            catalog, _read = _lenenc_str(payload[offset:end])
+            offset += _read
+            schema, _read = _lenenc_str(payload[offset:end])
+            offset += _read
+            table, _read = _lenenc_str(payload[offset:end])
+            offset += _read
+            org_table, _read = _lenenc_str(payload[offset:end])
+            offset += _read
+            col_name, _read = _lenenc_str(payload[offset:end])
             push!(col_names, col_name)
-            offset += len
-            org_name, len = _read_lenenc_str(payload[offset:end])
-            offset += len
+            offset += _read
+            org_name, _read = _lenenc_str(payload[offset:end])
+            offset += _read
             offset += 1 # length of fixed length fields
             character_set = _little_endian_int(payload[offset:offset+1])
             offset += 2
@@ -324,7 +277,7 @@ function execute(conn::MySQLConnection, query)
         else
             offset = 1
             for i in 1:column_count
-                value, len = _read_lenenc_str(payload[offset:end])
+                value, len = _lenenc_str(payload[offset:end])
                 offset += len
                 print("\t$(value)")
             end
@@ -332,7 +285,59 @@ function execute(conn::MySQLConnection, query)
         end
     end
 end
-# execute(conn::MySQLConnection, query) = execute(conn.sock, query)
+
+# OK Packet
+function _parse_ok_packet(payload, capability)
+    # https://dev.mysql.com/doc/internals/en/packet-OK_Packet.html
+    offset = 2
+    affected_rows, _read = _lenenc_int(payload[offset:end])
+    offset += _read
+    last_insert_id, _read = _lenenc_int(payload[offset:end])
+    offset += _read
+
+    status_flags = UInt16(0)
+    warnings = UInt16(0)
+    if capability &  CLIENT_PROTOCOL_41 > 0
+        status_flags = reinterpret(UInt16, payload[offset:offset+1])[]
+        offset += 2
+        warnings = reinterpret(UInt16, payload[offset:offset+1])
+        offset += 2
+    elseif capability & CLIENT_TRANSACTIONS > 0
+        status_flags = reinterpret(UInt16, payload[offset:offset+1])[]
+        offset += 2
+    end
+
+    # if capability & CLIENT_SESSION_TRACK > 0
+    #     @show info, _read = _lenenc_str(payload[offset:end])
+    #     offset += _read + 1
+    #
+    #     if capability & SERVER_SESSION_STATE_CHANGED > 0
+    #         session_state_changes, _read = _lenenc_str(payload[offset:end])
+    #         offset += _read
+    #     end
+    # else
+    #     info = String(payload[offset:end])
+    # end
+
+    return affected_rows, last_insert_id, status_flags, warnings
+end
+
+# Error Packet
+function _parse_error_packet(payload, capability)
+    # https://dev.mysql.com/doc/internals/en/packet-ERR_Packet.html
+    offset = 2
+    error_code = _little_endian_int(payload[offset:offset+1])
+    offset += 2
+
+    if capability & CLIENT_PROTOCOL_41 > 0
+        sql_state_marker = String([payload[offset]])
+        offset += 1
+        sql_state = String(payload[offset:offset+4])
+        offset += 5
+    end
+    error_message = String(payload[offset:end])
+    return error_code, sql_state, error_message
+end
 
 function _read_packet(sock)
     header = read(sock, 4)
@@ -364,7 +369,7 @@ function _com_query(query)
 end
 
 # https://dev.mysql.com/doc/internals/en/integer.html#packet-Protocol::LengthEncodedInteger
-function _read_lenenc_int(payload::Vector{Byte})
+function _lenenc_int(payload::Vector{Byte})
     io = IOBuffer(copy(payload))
     c = read(io, 1)[]
     _read = 1 # number of already read bytes
@@ -384,7 +389,6 @@ function _read_lenenc_int(payload::Vector{Byte})
         _read += 8
     elseif c == 0xff # 255
         # https://dev.mysql.com/doc/internals/en/packet-ERR_Packet.html
-        println("ERROR PACKET")
         err = c
     else
         result = Int64(c)
@@ -393,9 +397,9 @@ function _read_lenenc_int(payload::Vector{Byte})
     return result, _read
 end
 
-function _read_lenenc_str(payload::Vector{Byte})
+function _lenenc_str(payload::Vector{Byte})
     payload = copy(payload)
-    strlen, _read = _read_lenenc_int(payload)
+    strlen, _read = _lenenc_int(payload)
     offset = _read + 1
     result = payload[offset : offset+strlen-1]
 
