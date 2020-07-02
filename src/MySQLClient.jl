@@ -29,14 +29,44 @@ mutable struct MySQLConnection
     database::AbstractString
     protocol_version::Int
     server_version::VersionNumber
-    character_set_uint8::UInt8
+    character_set_uint8::Byte
     connection_id::Integer
     sequence_id::Byte
     auth_plugin_name::String
     auth_plugin_data::Vector{Byte}
+    ssl::Bool
 
-    function MySQLConnection(sock; host="127.0.0.1", port=3306, username="root", password="", database="")
-        new(sock, host, port, username, password, database, -1, v"0.0.0", 0x00, -1, 0x01, "", UInt8[])
+    function MySQLConnection(;sock,
+                             host,
+                             port,
+                             username,
+                             password,
+                             database,
+                             protocol_version=-1,
+                             server_version=v"0.0.0",
+                             character_set_uint8=0x00,
+                             connection_id=-1,
+                             sequence_id=0x01,
+                             auth_plugin_name="",
+                             auth_plugin_data=UInt8[],
+                             ssl=false)
+        conn = new()
+        conn.sock = sock
+        conn.host = host
+        conn.port = port
+        conn.username = username
+        conn.password = password
+        conn.database = database
+        conn.protocol_version = protocol_version
+        conn.server_version = server_version
+        conn.character_set_uint8 = character_set_uint8
+        conn.connection_id = connection_id
+        conn.sequence_id = sequence_id
+        conn.auth_plugin_name = auth_plugin_name
+        conn.auth_plugin_data = auth_plugin_data
+        conn.ssl = ssl
+
+        return conn
     end
 end
 
@@ -54,9 +84,9 @@ Base.read(conn::MySQLConnection) = read(conn.sock)
 Base.read(conn::MySQLConnection, x) = read(conn.sock, x)
 Base.isopen(conn::MySQLConnection) = isopen(conn.sock)
 
-function connect(;host="127.0.0.1", username, password, port=3306, database="")
+function connect(;host="127.0.0.1", username, password="", port=3306, database="")
     sock = Sockets.connect(host, port)
-    conn = MySQLConnection(sock, host=host, port=port, username=username, password=password, database=database)
+    conn = MySQLConnection(sock=sock, host=host, port=port, username=username, password=password, database=database)
     _handshake!(conn)
 
     return conn
