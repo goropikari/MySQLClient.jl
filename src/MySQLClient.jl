@@ -209,8 +209,8 @@ end
 function execute(conn::MySQLConnection, query)
     write(conn.sock, _com_query(query))
 
+    # https://dev.mysql.com/doc/internals/en/com-query-response.html
     packet = MySQLPacket(_read_packet(conn.sock)...)
-
     payload = copy(packet.payload)
     if payload[1] == OK_PACKET_HEADER
         @show _parse_ok_packet(payload, conn.capability)
@@ -220,32 +220,39 @@ function execute(conn::MySQLConnection, query)
         error_code, sql_state, error_message = _parse_error_packet(payload, conn.capability)
         error("$(error_code) ($(sql_state)) $(error_message)") # TODO: Make MySQLERROR
         return
+    elseif payload[1] == 0xfb
+        # TODO
+        # GET_MORE_CLIENT_DATA
     end
+
     column_count, _ = _lenenc_int(payload)
 
     # schema information
+    # https://dev.mysql.com/doc/internals/en/com-field-list-response.html
     col_names = String[]
     while (true)
         packet = MySQLPacket(_read_packet(conn.sock)...)
         payload = copy(packet.payload)
         if payload[1] == 0xfe
+            # https://dev.mysql.com/doc/internals/en/packet-EOF_Packet.html
             break
         elseif payload[1] == 0x00
             error("Unsupported query result")
         else
+            # https://dev.mysql.com/doc/internals/en/com-query-response.html#column-definition
             offset = 1
-            catalog, _read = _lenenc_str(payload[offset:end])
+            catalog, _read = _lenenc_str(payload[offset:end]) # always `def`
             offset += _read
             schema, _read = _lenenc_str(payload[offset:end])
             offset += _read
-            table, _read = _lenenc_str(payload[offset:end])
+            table, _read = _lenenc_str(payload[offset:end]) # virtual table-name
             offset += _read
-            org_table, _read = _lenenc_str(payload[offset:end])
+            org_table, _read = _lenenc_str(payload[offset:end]) # physical table-name
             offset += _read
-            col_name, _read = _lenenc_str(payload[offset:end])
+            @show col_name, _read = _lenenc_str(payload[offset:end]) # virtual column name
             push!(col_names, col_name)
             offset += _read
-            org_name, _read = _lenenc_str(payload[offset:end])
+            @show org_name, _read = _lenenc_str(payload[offset:end]) # physical column name
             offset += _read
             offset += 1 # length of fixed length fields
             character_set = _little_endian_int(payload[offset:offset+1])
@@ -258,7 +265,7 @@ function execute(conn::MySQLConnection, query)
             offset += 2
             decimals = payload[offset]
             offset += 1
-            # @show catalog, schema, table, org_table, col_name, org_name, character_set, column_length, column_type, flags, decimals
+            @show catalog, schema, table, org_table, col_name, org_name, character_set, column_length, column_type, flags, decimals
         end
     end
 
@@ -268,7 +275,8 @@ function execute(conn::MySQLConnection, query)
     println()
     println("-"^30)
 
-    # values
+    # row
+    # https://dev.mysql.com/doc/internals/en/com-query-response.html#packet-ProtocolText::ResultsetRow
     while (true)
         packet = MySQLPacket(_read_packet(conn.sock)...)
         payload = copy(packet.payload)
